@@ -28,19 +28,31 @@ def clean_live_in(text: str) -> str:
 
 
 def sanitize_filename(name: str) -> str:
+    # Windows-safe filename / folder name
     return re.sub(r'[\\/:*?"<>|]', "_", name)
 
 
 def parse_track_from_title(track_title: str):
+    """
+    Parse leading track number + title.
+
+    Accepts:
+      '07 Extinction'
+      '07 - Extinction'
+      '7. Extinction'
+      'Extinction' -> (None, 'Extinction')
+    """
     if not track_title:
         return None, ""
 
     s = track_title.strip()
 
+    # "07 Extinction"
     m = re.match(r"^\s*(\d+)\s+(.+)$", s)
     if m:
         return int(m.group(1)), m.group(2).strip()
 
+    # "07 - Extinction" / "7. Extinction"
     m = re.match(r"^\s*(\d+)\s*[-.\s]\s*(.+)$", s)
     if m:
         return int(m.group(1)), m.group(2).strip()
@@ -49,6 +61,13 @@ def parse_track_from_title(track_title: str):
 
 
 def fetch_album_name_and_setlist(date_iso: str):
+    """
+    For a single date:
+      - Build album location info (venue/city/country)
+      - Return (album_suffix, setlist_song_names)
+
+    album_suffix is "Venue City Country" portion (no date, no ' (Bootlegger)' yet).
+    """
     if not SETLISTFM_API_KEY:
         raise RuntimeError("You must set SETLISTFM_API_KEY in the script.")
 
@@ -71,7 +90,7 @@ def fetch_album_name_and_setlist(date_iso: str):
         "p": 1,
     }
 
-    print(f"\n🔎 Querying Setlist.fm for {ARTIST_NAME} on {date_ddmmyyyy} ...\n")
+    print(f"\n🔎 Querying Setlist.fm for {ARTIST_NAME} on {date_ddmmyyyy} ...")
     resp = requests.get(url, headers=headers, params=params, timeout=15)
 
     if resp.status_code != 200:
@@ -99,19 +118,19 @@ def fetch_album_name_and_setlist(date_iso: str):
         parts.append(country_name)
 
     location = " ".join(parts).strip()
-    album_name = f"{date_iso} {location} (Bootlegger)"
 
-    # Extract Setlist
+    # Extract setlist songs
     setlist_songs = []
-    if "sets" in s and "set" in s["sets"]:
-        for set_block in s["sets"]["set"]:
+    sets_block = s.get("sets", {})
+    if isinstance(sets_block, dict):
+        for set_block in sets_block.get("set", []):
             if "song" in set_block:
                 for song in set_block["song"]:
                     name = song.get("name")
                     if name:
                         setlist_songs.append(name)
 
-    return album_name, setlist_songs
+    return location, setlist_songs
 
 
 def load_audio(path: Path):
@@ -121,6 +140,12 @@ def load_audio(path: Path):
 
 
 def get_track_info_from_tags_or_filename(path: Path, audio):
+    """
+    1. Try title from tags.
+    2. Strip " (Live in ...)".
+    3. Parse number + title.
+    4. If no number, fallback to filename pattern.
+    """
     title_tag = None
 
     for key in ("title", "tracktitle"):
@@ -148,7 +173,7 @@ def get_track_info_from_tags_or_filename(path: Path, audio):
     return track_no, clean_title
 
 
-def tag_with_mutagen(path: Path, album: str, date_str: str):
+def tag_with_mutagen(path: Path, album: str, disc_date: str, disc_number: int):
     print(f"Processing: {path.name}")
 
     if path.suffix.lower() not in AUDIO_EXTS:
@@ -162,25 +187,36 @@ def tag_with_mutagen(path: Path, album: str, date_str: str):
 
     track_no, clean_title = get_track_info_from_tags_or_filename(path, audio)
 
+    print(f"  Disc   : {disc_number}")
+    print(f"  Date   : {disc_date}")
     print(f"  Track #: {track_no}")
     print(f"  Title  : {clean_title}")
 
+    # Clear controlled fields
     for key in (
         "album", "artist", "albumartist",
         "genre", "discnumber", "date", "year",
         "releasetype", "tracknumber", "title"
     ):
         if key in audio:
-            try: del audio[key]
-            except: pass
+            try:
+                del audio[key]
+            except Exception:
+                pass
 
+    # Tagging
     audio["album"] = [album]
     audio["artist"] = [ARTIST_NAME]
     audio["albumartist"] = [ARTIST_NAME]
+
+    # four backslashes in literal → two backslashes in tag
     audio["genre"] = ["Psychedelic Rock\\\\Jam Band"]
-    audio["discnumber"] = ["1"]
-    audio["date"] = [date_str]
-    audio["year"] = [date_str]
+
+    audio["discnumber"] = [str(disc_number)]
+
+    # Per-disc date/year
+    audio["date"] = [disc_date]
+    audio["year"] = [disc_date]
 
     if isinstance(audio, FLAC):
         audio["releasetype"] = ["album;live"]
@@ -193,8 +229,8 @@ def tag_with_mutagen(path: Path, album: str, date_str: str):
 
     audio.save()
 
+    # Rename to "07 Extinction.ext"
     safe_title = sanitize_filename(clean_title or "Unknown")
-
     if track_no is not None:
         new_base = f"{track_no:02d} {safe_title}"
     else:
@@ -211,33 +247,52 @@ def tag_with_mutagen(path: Path, album: str, date_str: str):
 
 
 def main():
-    if len(sys.argv) != 3:
+    # Require: folder + at least one date
+    if len(sys.argv) < 3:
         print("\nUsage:")
-        print("  python tag_kglwBL.py /path/to/folder yyyy-mm-dd\n")
+        print("  python tag_kglwBL.py /path/to/folder yyyy-mm-dd [yyyy-mm-dd ...]\n")
         print("Example:")
-        print("  python tag_kglwBL.py \"D:/Music/KGLW/2025-10-24\" 2025-10-24\n")
+        print("  python tag_kglwBL.py \"D:/Music/KGLW/Berlin_Run\" 2025-10-24 2025-10-25\n")
         print("❌ Missing required args.\n")
         return
 
     folder = Path(sys.argv[1])
-    date_str = sys.argv[2]
+    date_list = [d.strip() for d in sys.argv[2:]]
 
     if not folder.is_dir():
         print(f"❌ Folder not found: {folder}")
         return
 
-    album_name, setlist_songs = fetch_album_name_and_setlist(date_str)
+    # Fetch location & setlists for each date
+    locations = []
+    setlists_per_date = []
+    for d in date_list:
+        loc, sl = fetch_album_name_and_setlist(d)
+        locations.append(loc)
+        setlists_per_date.append(sl)
 
+    # Album name is based on FIRST date only
+    first_date = date_list[0]
+    first_location = locations[0]
+    album_name = f"{first_date} {first_location} (Bootlegger)"
+
+    # Show album + all setlists
     print("\n=====================================")
-    print(" ALBUM NAME GENERATED")
+    print(" ALBUM NAME (BASED ON FIRST DATE)")
     print("=====================================")
     print(album_name)
 
     print("\n=====================================")
-    print(" SETLIST FROM SETLIST.FM")
+    print(" SETLISTS PER DATE / DISC")
     print("=====================================")
-    for i, song in enumerate(setlist_songs, 1):
-        print(f"{i:02d}. {song}")
+    for idx, (d, sl) in enumerate(zip(date_list, setlists_per_date), start=1):
+        print(f"\nDisc {idx} - {d}")
+        print("-" * 30)
+        if sl:
+            for i, song in enumerate(sl, 1):
+                print(f"{i:02d}. {song}")
+        else:
+            print("(No songs found in setlist)")
 
     print("\n=====================================")
     confirm = input("Proceed with tagging & renaming? (y/n): ").strip().lower()
@@ -248,10 +303,39 @@ def main():
 
     print("\n✔ Proceeding...\n")
 
-    for entry in sorted(folder.iterdir()):
-        if entry.is_file():
-            tag_with_mutagen(entry, album_name, date_str)
+    # Determine per-file disc mapping based on setlist lengths
+    files = [f for f in sorted(folder.iterdir()) if f.is_file()]
 
+    # Number of tracks per date from setlists
+    track_counts = [len(sl) for sl in setlists_per_date]
+    if not any(track_counts):
+        # fallback: put everything on disc 1 if setlists are empty
+        track_counts = [len(files)] + [0] * (len(date_list) - 1)
+
+    cumulative = []
+    running = 0
+    for c in track_counts:
+        running += c
+        cumulative.append(running)
+
+    def get_disc_for_index(idx: int):
+        """
+        Given file index, determine disc index (0-based) and date.
+        Uses cumulative setlist lengths. Extra files → last disc.
+        """
+        for disc_idx, boundary in enumerate(cumulative):
+            if idx < boundary:
+                return disc_idx
+        return len(date_list) - 1  # fall back to last disc
+
+    # Tag each file with disc/date based on its position
+    for i, entry in enumerate(files):
+        disc_idx = get_disc_for_index(i)
+        disc_number = disc_idx + 1
+        disc_date = date_list[disc_idx]
+        tag_with_mutagen(entry, album_name, disc_date, disc_number)
+
+    # Rename folder to album name (based on first date)
     safe_folder_name = sanitize_filename(album_name)
     new_folder = folder.parent / safe_folder_name
 
