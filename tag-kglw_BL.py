@@ -274,7 +274,10 @@ def main():
     # Album name is based on FIRST date only
     first_date = date_list[0]
     first_location = locations[0]
-    album_name = f"{first_date} {first_location} (Bootlegger)"
+
+    # Build album name and strip commas
+    album_name_raw = f"{first_date} {first_location} (Bootlegger)"
+    album_name = album_name_raw.replace(",", "")
 
     # Show album + all setlists
     print("\n=====================================")
