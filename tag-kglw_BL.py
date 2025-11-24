@@ -1,15 +1,20 @@
 import re
 import sys
 from pathlib import Path
+import os
 
 import requests
 from mutagen import File as MutagenFile
 from mutagen.flac import FLAC
 
+# NEW: load .env
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    load_dotenv = None
+
 # ------------------------------------
-# HARDCODE YOUR SETLIST.FM API KEY HERE
-# ------------------------------------
-SETLISTFM_API_KEY = ""
+# CONFIG
 # ------------------------------------
 
 ARTIST_NAME = "King Gizzard & The Lizard Wizard"
@@ -19,6 +24,24 @@ AUDIO_EXTS = {
 }
 
 LIVE_IN_REGEX = re.compile(r"\s*\(Live in.*?\)", re.IGNORECASE)
+
+
+def load_env():
+    """
+    Load environment variables from .env if python-dotenv is installed.
+    Falls back to OS env vars.
+    """
+    if load_dotenv is not None:
+        load_dotenv()  # loads from .env in current working dir
+
+    api_key = os.getenv("SETLISTFM_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError(
+            "Missing SETLISTFM_API_KEY. Put it in a .env file or your environment.\n"
+            "Example .env:\n"
+            "  SETLISTFM_API_KEY=your_key_here\n"
+        )
+    return api_key
 
 
 def clean_live_in(text: str) -> str:
@@ -41,11 +64,20 @@ def parse_track_from_title(track_title: str):
       '07 - Extinction'
       '7. Extinction'
       'Extinction' -> (None, 'Extinction')
+
+    Special-case:
+      '2.02 Killer Year'  -> (None, '2.02 Killer Year')
+      (decimal-prefixed song titles should NOT be treated as track numbers)
     """
     if not track_title:
         return None, ""
 
     s = track_title.strip()
+
+    # NEW: if it starts with a decimal-ish pattern, treat whole thing as title
+    # e.g. "2.02 Killer Year" or "1.01 The Grid"
+    if re.match(r"^\s*\d+\.\d+\s+.+$", s):
+        return None, s
 
     # "07 Extinction"
     m = re.match(r"^\s*(\d+)\s+(.+)$", s)
@@ -60,7 +92,7 @@ def parse_track_from_title(track_title: str):
     return None, s
 
 
-def fetch_album_name_and_setlist(date_iso: str):
+def fetch_album_name_and_setlist(date_iso: str, api_key: str):
     """
     For a single date:
       - Build album location info (venue/city/country)
@@ -68,9 +100,6 @@ def fetch_album_name_and_setlist(date_iso: str):
 
     album_suffix is "Venue City Country" portion (no date, no ' (Bootlegger)' yet).
     """
-    if not SETLISTFM_API_KEY:
-        raise RuntimeError("You must set SETLISTFM_API_KEY in the script.")
-
     try:
         y, m, d = date_iso.split("-")
         date_ddmmyyyy = f"{d}-{m}-{y}"
@@ -79,7 +108,7 @@ def fetch_album_name_and_setlist(date_iso: str):
 
     url = "https://api.setlist.fm/rest/1.0/search/setlists"
     headers = {
-        "x-api-key": SETLISTFM_API_KEY,
+        "x-api-key": api_key,
         "Accept": "application/json",
         "Accept-Language": "en",
         "User-Agent": "kglw-bootleg-tagger/1.0",
@@ -143,7 +172,8 @@ def get_track_info_from_tags_or_filename(path: Path, audio):
     """
     1. Try title from tags.
     2. Strip " (Live in ...)".
-    3. Parse number + title.
+
+    3. Parse number + title (ignores decimal-prefixed titles).
     4. If no number, fallback to filename pattern.
     """
     title_tag = None
@@ -229,7 +259,7 @@ def tag_with_mutagen(path: Path, album: str, disc_date: str, disc_number: int):
 
     audio.save()
 
-    # Rename to "07 Extinction.ext"
+    # Rename to "07 Extinction.ext" (or no leading number if None)
     safe_title = sanitize_filename(clean_title or "Unknown")
     if track_no is not None:
         new_base = f"{track_no:02d} {safe_title}"
@@ -247,6 +277,8 @@ def tag_with_mutagen(path: Path, album: str, disc_date: str, disc_number: int):
 
 
 def main():
+    api_key = load_env()
+
     # Require: folder + at least one date
     if len(sys.argv) < 3:
         print("\nUsage:")
@@ -267,7 +299,7 @@ def main():
     locations = []
     setlists_per_date = []
     for d in date_list:
-        loc, sl = fetch_album_name_and_setlist(d)
+        loc, sl = fetch_album_name_and_setlist(d, api_key)
         locations.append(loc)
         setlists_per_date.append(sl)
 
